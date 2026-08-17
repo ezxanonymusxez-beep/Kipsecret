@@ -1,0 +1,1299 @@
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local PathfindingService = game:GetService("PathfindingService")
+local Lighting = game:GetService("Lighting")
+local LocalPlayer = Players.LocalPlayer
+
+-- ==========================================
+-- VARIABILI
+-- ==========================================
+local autoMode = "Classic"
+local isTracking = false
+local targetNumber = 5
+local KEEP_DISTANCE = 3.5
+local wallDistance = 2.5
+local wallHopEnabled = true
+local debounceJump = true
+local flickEnabled = false
+local flickPower = 45
+local isFlicking = false
+local flickConnection = nil
+local stretchEnabled = false
+local stretchConn = nil
+local fpsEnabled = false
+local escapeMode = false
+local escConn = nil
+local escapeStep = 0
+local hadTool = false
+local cam = workspace.CurrentCamera
+
+-- Hitbox Expander
+local hitboxEnabled = false
+local hitboxSize = 5
+local hitboxVisible = false
+local hitboxParts = {} -- Tabella per tenere traccia delle parti aggiunte
+
+local C = {
+    bg    = Color3.fromRGB(8, 0, 0),
+    panel = Color3.fromRGB(15, 0, 0),
+    card  = Color3.fromRGB(25, 3, 3),
+    blood = Color3.fromRGB(160, 0, 0),
+    red   = Color3.fromRGB(220, 20, 20),
+    glow  = Color3.fromRGB(255, 80, 80),
+    white = Color3.new(1, 1, 1),
+    muted = Color3.fromRGB(160, 80, 80),
+    dim   = Color3.fromRGB(50, 10, 10),
+    gold  = Color3.fromRGB(255, 180, 30),
+    dark  = Color3.fromRGB(5, 0, 0),
+    hitbox = Color3.fromRGB(255, 0, 0) -- Colore per hitbox visibile
+}
+
+-- ==========================================
+-- FUNZIONI UTILITY
+-- ==========================================
+local function tw(obj, props, t, style, dir)
+    local tween = TweenService:Create(obj, TweenInfo.new(t or 0.5, style or Enum.EasingStyle.Quart, dir or Enum.EasingDirection.Out), props)
+    tween:Play()
+    return tween
+end
+
+-- ==========================================
+-- HITBOX EXPANDER
+-- ==========================================
+local function createHitboxForPlayer(player)
+    if not player or not player.Character then return end
+    if player == LocalPlayer then return end
+    
+    local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    
+    -- Rimuovi vecchia hitbox se esiste
+    if hitboxParts[player] then
+        hitboxParts[player]:Destroy()
+        hitboxParts[player] = nil
+    end
+    
+    -- Crea parte espansa
+    local expander = Instance.new("Part")
+    expander.Name = "HitboxExpander"
+    expander.Size = Vector3.new(hitboxSize * 2, hitboxSize * 2, hitboxSize * 2)
+    expander.CFrame = hrp.CFrame
+    expander.Anchored = true
+    expander.CanCollide = false
+    expander.Transparency = hitboxVisible and 0.7 or 1
+    expander.Color = C.hitbox
+    expander.Material = Enum.Material.ForceField
+    expander.Parent = player.Character
+    
+    -- Connessione per seguire il player
+    local connection
+    connection = RunService.Heartbeat:Connect(function()
+        if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then
+            if connection then connection:Disconnect() end
+            if hitboxParts[player] then
+                hitboxParts[player]:Destroy()
+                hitboxParts[player] = nil
+            end
+            return
+        end
+        
+        if hitboxParts[player] then
+            hitboxParts[player].CFrame = player.Character.HumanoidRootPart.CFrame
+            hitboxParts[player].Size = Vector3.new(hitboxSize * 2, hitboxSize * 2, hitboxSize * 2)
+            hitboxParts[player].Transparency = hitboxVisible and 0.7 or 1
+        end
+    end)
+    
+    hitboxParts[player] = expander
+end
+
+local function removeAllHitboxes()
+    for player, part in pairs(hitboxParts) do
+        if part then part:Destroy() end
+    end
+    hitboxParts = {}
+end
+
+local function updateHitboxSystem()
+    if not hitboxEnabled then
+        removeAllHitboxes()
+        return
+    end
+    
+    -- Aggiungi hitbox a tutti i player esistenti
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            createHitboxForPlayer(player)
+        end
+    end
+end
+
+-- Gestione nuovi player
+Players.PlayerAdded:Connect(function(player)
+    if hitboxEnabled then
+        player.CharacterAdded:Connect(function()
+            task.wait(0.5)
+            if hitboxEnabled then
+                createHitboxForPlayer(player)
+            end
+        end)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    if hitboxParts[player] then
+        hitboxParts[player]:Destroy()
+        hitboxParts[player] = nil
+    end
+end)
+
+-- ==========================================
+-- GAME FUNCTIONS
+-- ==========================================
+local function hasTool(plr)
+    local c = plr and plr.Character
+    if not c then return false end
+    for _, v in ipairs(c:GetChildren()) do 
+        if v:IsA("Tool") then return true end 
+    end 
+    return false 
+end
+
+local function getClosest()
+    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then 
+        return nil, 999 
+    end
+    local mp = LocalPlayer.Character.HumanoidRootPart.Position
+    local cp, cd = nil, 999
+    for _, p in ipairs(Players:GetPlayers()) do 
+        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then 
+            local d = (p.Character.HumanoidRootPart.Position - mp).Magnitude 
+            if d < cd then cd = d; cp = p end 
+        end 
+    end 
+    return cp, cd 
+end
+
+local function getNum(plr)
+    if not plr or not plr.Character then return nil end
+    for _, t in pairs(plr.Character:GetChildren()) do 
+        if t:IsA("Tool") then 
+            for _, ch in pairs(t:GetDescendants()) do 
+                if ch:IsA("BillboardGui") then 
+                    for _, gc in pairs(ch:GetDescendants()) do 
+                        if gc:IsA("TextLabel") and gc.Text ~= "" then 
+                            local n = tonumber(gc.Text) 
+                            if n then return n end 
+                        end 
+                    end 
+                end 
+            end 
+            local n = tonumber(t.Name) 
+            if n then return n end 
+        end 
+    end 
+    return nil 
+end
+
+local function getPathToTarget(targetPos)
+    if not LocalPlayer.Character then return nil end
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 2.5,
+        AgentHeight = 5,
+        AgentCanJump = false,
+        AgentMaxSlope = 45,
+        WaypointSpacing = 3
+    })
+    
+    local success = pcall(function()
+        path:ComputeAsync(LocalPlayer.Character.HumanoidRootPart.Position, targetPos)
+    end)
+    
+    if success and path.Status == Enum.PathStatus.Success then
+        return path:GetWaypoints()
+    end
+    return nil
+end
+
+local function startAuto()
+    isTracking = true
+    local waypoints = nil
+    local currentWP = 1
+    local lastUpdate = 0
+    
+    local conn = RunService.Heartbeat:Connect(function()
+        if not isTracking then conn:Disconnect() return end
+        if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("Humanoid") then return end
+        
+        local h = LocalPlayer.Character.Humanoid
+        local t, d = getClosest()
+        if not t or not t.Character then return end
+        
+        local targetPos = t.Character.HumanoidRootPart.Position
+        local mn = getNum(LocalPlayer)
+        local tn = getNum(t)
+        local chase = false
+        
+        if autoMode == "Classic" then 
+            if hasTool(LocalPlayer) or hasTool(t) then 
+                if mn and mn <= targetNumber then chase = true end
+                if tn and tn <= targetNumber then chase = true end
+                if not hasTool(LocalPlayer) and hasTool(t) then chase = true end 
+            end 
+        else 
+            if hasTool(LocalPlayer) and mn and mn <= targetNumber then chase = true end 
+        end 
+        
+        if chase then 
+            h.WalkSpeed = 21
+            
+            if tick() - lastUpdate > 0.2 then
+                lastUpdate = tick()
+                local rayParams = RaycastParams.new()
+                rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
+                local ray = workspace:Raycast(LocalPlayer.Character.HumanoidRootPart.Position, 
+                    (targetPos - LocalPlayer.Character.HumanoidRootPart.Position).Unit * d, rayParams)
+                
+                if ray and ray.Instance and not ray.Instance:IsDescendantOf(t.Character) then
+                    waypoints = getPathToTarget(targetPos)
+                    currentWP = 1
+                else
+                    waypoints = nil
+                end
+            end
+            
+            if waypoints and currentWP <= #waypoints then
+                h:MoveTo(waypoints[currentWP].Position)
+                if (LocalPlayer.Character.HumanoidRootPart.Position - waypoints[currentWP].Position).Magnitude < 3 then
+                    currentWP = currentWP + 1
+                end
+            else
+                if d <= KEEP_DISTANCE then 
+                    local dir = (LocalPlayer.Character.HumanoidRootPart.Position - targetPos).Unit 
+                    h:MoveTo(targetPos + dir * KEEP_DISTANCE) 
+                else 
+                    h:MoveTo(targetPos) 
+                end
+            end
+        else
+            h.WalkSpeed = 16
+        end
+    end)
+end
+
+local function stopAuto()
+    isTracking = false 
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then 
+        LocalPlayer.Character.Humanoid.WalkSpeed = 16 
+    end 
+end
+
+local function doFlick()
+    if isFlicking then return end
+    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
+    if not hasTool(LocalPlayer) then return end
+    
+    isFlicking = true
+    local root = LocalPlayer.Character.HumanoidRootPart
+    local duration = 1.5
+    local cycleCounter = 0
+    local currentDirection = 1
+    
+    flickConnection = RunService.RenderStepped:Connect(function()
+        if not root or not root.Parent then 
+            if flickConnection then flickConnection:Disconnect() end
+            isFlicking = false
+            return 
+        end
+        cycleCounter = cycleCounter + 1
+        if cycleCounter % 5 == 0 then
+            task.wait(math.random(1, 3) / 100)
+            if math.random(1, 10) > 7 then currentDirection = -currentDirection end
+        end
+        local humanizer = math.random(36, 42) * currentDirection
+        root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(humanizer), 0)
+    end)
+    
+    task.wait(duration)
+    if flickConnection then 
+        flickConnection:Disconnect() 
+        flickConnection = nil 
+    end
+    isFlicking = false
+end
+
+local function toggleFlick(state)
+    flickEnabled = state
+    if state then
+        task.spawn(function()
+            while flickEnabled do
+                if hasTool(LocalPlayer) then
+                    local _, d = getClosest()
+                    if d <= KEEP_DISTANCE then
+                        doFlick()
+                    end
+                end
+                task.wait(0.5)
+            end
+        end)
+    else
+        if flickConnection then 
+            flickConnection:Disconnect() 
+            flickConnection = nil 
+        end
+        isFlicking = false
+    end
+end
+
+-- Escape mode
+coroutine.wrap(function()
+    while true do
+        if isTracking and escapeMode then
+            local htn = hasTool(LocalPlayer)
+            if not hadTool and htn and not escConn then
+                escapeStep = 1
+                escConn = RunService.Heartbeat:Connect(function()
+                    if escapeStep == 1 then
+                        local c = LocalPlayer.Character
+                        if not c then return end
+                        local r = c:FindFirstChild("HumanoidRootPart")
+                        local h = c:FindFirstChildOfClass("Humanoid")
+                        if not r or not h then return end
+                        local t, d = getClosest()
+                        if t then 
+                            h.WalkSpeed = 30 
+                            local dir = (r.Position - t.Character.HumanoidRootPart.Position).Unit 
+                            h:MoveTo(r.Position + dir * 10) 
+                        end 
+                        task.wait(0.5) 
+                        escapeStep = 2
+                    elseif escapeStep == 2 then
+                        local c = LocalPlayer.Character
+                        if not c then return end
+                        local r = c:FindFirstChild("HumanoidRootPart")
+                        local h = c:FindFirstChildOfClass("Humanoid")
+                        if not r or not h then return end
+                        local t, d = getClosest()
+                        if t then 
+                            h.WalkSpeed = 21 
+                            h:MoveTo(t.Character.HumanoidRootPart.Position) 
+                        end 
+                    end
+                end)
+            end
+            if hadTool and not htn then escapeStep = 2 end
+            hadTool = htn
+        else 
+            hadTool = false 
+            escapeStep = 0 
+            if escConn then escConn:Disconnect(); escConn = nil end 
+        end 
+        task.wait(0.2) 
+    end 
+end)()
+
+local function updateStretch()
+    if stretchConn then stretchConn:Disconnect(); stretchConn = nil end
+    if not stretchEnabled then return end
+    stretchConn = RunService.RenderStepped:Connect(function()
+        cam.CFrame = cam.CFrame * CFrame.new(0, 0, 0, 1, 0, 0, 0, 0.75, 0, 0, 0, 1) 
+    end) 
+end
+
+-- ==========================================
+-- FPS BOOSTER MIGLIORATO
+-- ==========================================
+local function applyFPS()
+    if not fpsEnabled then return end
+    
+    -- Disabilita ombre globali
+    Lighting.GlobalShadows = false
+    Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+    Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
+    Lighting.Brightness = 1
+    
+    -- Riduci qualità rendering
+    pcall(function() 
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 
+    end)
+    
+    -- Disabilita effetti atmosferici
+    for _, v in pairs(Lighting:GetChildren()) do
+        if v:IsA("Atmosphere") or v:IsA("Bloom") or v:IsA("Blur") or v:IsA("ColorCorrection") or v:IsA("SunRays") or v:IsA("DepthOfField") then
+            v.Enabled = false
+        end
+    end
+    
+    -- Ottimizza parti esistenti
+    local function optimizePart(o)
+        if o:IsA("BasePart") then 
+            o.Material = Enum.Material.SmoothPlastic 
+            o.Reflectance = 0
+            o.CastShadow = false
+        elseif o:IsA("Decal") or o:IsA("Texture") then
+            o.Transparency = 1
+        elseif o:IsA("ParticleEmitter") or o:IsA("Trail") then
+            o.Enabled = false
+        elseif o:IsA("Fire") or o:IsA("Smoke") or o:IsA("Sparkles") then
+            o.Enabled = false
+        end
+    end
+    
+    -- Ottimizza workspace
+    for _, v in pairs(Workspace:GetDescendants()) do 
+        optimizePart(v) 
+    end
+    
+    -- Ottimizza nuovi oggetti
+    Workspace.DescendantAdded:Connect(optimizePart)
+    
+    -- Disabilita animazioni complesse dei player
+    for _, player in pairs(Players:GetPlayers()) do
+        if player.Character then
+            local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                humanoid.Animator:Destroy()
+            end
+        end
+    end
+end
+
+-- WALLHOP
+local rP = RaycastParams.new()
+rP.FilterType = Enum.RaycastFilterType.Blacklist
+
+local function getWall()
+    local c = LocalPlayer.Character
+    if not c then return nil end
+    local r = c:FindFirstChild("HumanoidRootPart")
+    if not r then return nil end
+    rP.FilterDescendantsInstances = {c}
+    local dirs = {r.CFrame.LookVector, -r.CFrame.LookVector, r.CFrame.RightVector, -r.CFrame.RightVector}
+    local h, md = nil, wallDistance + 1
+    for _, d in pairs(dirs) do 
+        local ry = workspace:Raycast(r.Position, d * wallDistance, rP)
+        if ry and ry.Instance and ry.Distance < md then 
+            md = ry.Distance 
+            h = ry 
+        end 
+    end 
+    return h 
+end
+
+UserInputService.JumpRequest:Connect(function()
+    if not wallHopEnabled or not debounceJump then return end
+    local c = LocalPlayer.Character
+    local h = c and c:FindFirstChildOfClass("Humanoid")
+    local r = c and c:FindFirstChild("HumanoidRootPart")
+    if not (h and r) then return end
+    local w = getWall()
+    if w then 
+        debounceJump = false
+        local wn = w.Normal
+        local hwn = Vector3.new(wn.X, 0, wn.Z).Unit
+        if hwn.Magnitude < 0.1 then 
+            hwn = (r.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit 
+        end
+        local b = hwn
+        local cl = workspace.CurrentCamera.CFrame.LookVector
+        local hcl = Vector3.new(cl.X, 0, cl.Z).Unit
+        local ma = math.rad(12)
+        local dt = math.clamp(b:Dot(hcl), -1, 1)
+        local ab = math.acos(dt)
+        local cr = b:Cross(hcl)
+        local rs = math.sign(cr.Y)
+        if rs == 0 then ab = 0 end
+        local aa = math.min(ab, ma)
+        local ar = CFrame.Angles(0, aa * rs, 0)
+        local it = ar * b
+        r.CFrame = CFrame.lookAt(r.Position, r.Position + it)
+        RunService.Heartbeat:Wait()
+        h:ChangeState(Enum.HumanoidStateType.Jumping)
+        h.JumpPower = 27
+        r.CFrame = CFrame.lookAt(r.Position, r.Position - b)
+        task.wait(0.35)
+        debounceJump = true 
+    end 
+end)
+
+-- ==========================================
+-- INTRO wKip CENTRATO
+-- ==========================================
+local function playIntro(parent, callback)
+    local bg = Instance.new("Frame", parent)
+    bg.Size = UDim2.new(1, 0, 1, 0)
+    bg.BackgroundColor3 = C.dark
+    bg.BackgroundTransparency = 0
+    bg.ZIndex = 1000
+    
+    local center = Instance.new("Frame", bg)
+    center.Size = UDim2.new(0, 0, 0, 0)
+    center.Position = UDim2.new(0.5, 0, 0.5, 0)
+    center.AnchorPoint = Vector2.new(0.5, 0.5)
+    center.BackgroundColor3 = C.blood
+    center.BorderSizePixel = 0
+    center.ZIndex = 1001
+    Instance.new("UICorner", center).CornerRadius = UDim.new(1, 0)
+    
+    local letterContainer = Instance.new("Frame", bg)
+    letterContainer.Size = UDim2.new(0, 280, 0, 100)
+    letterContainer.Position = UDim2.new(0.5, 0, 0.5, 0)
+    letterContainer.AnchorPoint = Vector2.new(0.5, 0.5)
+    letterContainer.BackgroundTransparency = 1
+    letterContainer.ZIndex = 1002
+    
+    local letters = {"w", "K", "i", "p"}
+    local letterLabels = {}
+    
+    for i, letter in ipairs(letters) do
+        local lbl = Instance.new("TextLabel", letterContainer)
+        lbl.Size = UDim2.new(0, 70, 1, 0)
+        lbl.Position = UDim2.new(0, (i-1)*70, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = letter
+        lbl.TextColor3 = C.white
+        lbl.TextSize = 0
+        lbl.Font = Enum.Font.GothamBold
+        lbl.ZIndex = 1003
+        lbl.TextTransparency = 1
+        table.insert(letterLabels, lbl)
+    end
+    
+    tw(bg, {BackgroundTransparency = 0.1}, 0.5)
+    tw(center, {Size = UDim2.new(0, 320, 0, 320)}, 0.8, Enum.EasingStyle.Back)
+    
+    task.wait(0.4)
+    
+    for i, lbl in ipairs(letterLabels) do
+        task.wait(0.15)
+        for j = 1, 3 do
+            lbl.TextTransparency = 0.2
+            lbl.TextSize = math.random(50, 70)
+            lbl.TextColor3 = j == 2 and C.glow or C.white
+            task.wait(0.03)
+        end
+        if lbl.Text == "K" then
+            lbl.TextSize = 75
+        else
+            lbl.TextSize = 55
+        end
+        lbl.TextTransparency = 0
+        lbl.TextColor3 = C.white
+        
+        local orig = lbl.Position
+        for j = 1, 5 do
+            lbl.Position = UDim2.new(orig.X.Scale, orig.X.Offset + math.random(-2, 2), 
+                                    orig.Y.Scale, orig.Y.Offset + math.random(-2, 2))
+            task.wait(0.02)
+        end
+        lbl.Position = orig
+    end
+    
+    task.wait(0.4)
+    
+    local sub = Instance.new("TextLabel", bg)
+    sub.Size = UDim2.new(0, 300, 0, 30)
+    sub.Position = UDim2.new(0.5, -150, 0.5, 60)
+    sub.BackgroundTransparency = 1
+    sub.Text = "SECRET"
+    sub.TextColor3 = C.glow
+    sub.TextSize = 0
+    sub.Font = Enum.Font.GothamBold
+    sub.ZIndex = 1002
+    tw(sub, {TextSize = 24}, 0.4, Enum.EasingStyle.Back)
+    
+    local barBg = Instance.new("Frame", bg)
+    barBg.Size = UDim2.new(0, 200, 0, 4)
+    barBg.Position = UDim2.new(0.5, -100, 0.5, 100)
+    barBg.BackgroundColor3 = C.dim
+    barBg.BorderSizePixel = 0
+    barBg.ZIndex = 1002
+    
+    local bar = Instance.new("Frame", barBg)
+    bar.Size = UDim2.new(0, 0, 1, 0)
+    bar.BackgroundColor3 = C.blood
+    bar.BorderSizePixel = 0
+    bar.ZIndex = 1003
+    tw(bar, {Size = UDim2.new(1, 0, 1, 0)}, 1.2, Enum.EasingStyle.Quad)
+    
+    task.wait(1.5)
+    
+    for _, lbl in ipairs(letterLabels) do
+        tw(lbl, {TextSize = 0, TextTransparency = 1}, 0.3)
+    end
+    tw(sub, {TextSize = 0, TextTransparency = 1}, 0.3)
+    tw(barBg, {BackgroundTransparency = 1}, 0.3)
+    tw(bar, {BackgroundTransparency = 1}, 0.3)
+    tw(center, {Size = UDim2.new(0, 0, 0, 0)}, 0.5, Enum.EasingStyle.Back)
+    tw(bg, {BackgroundTransparency = 1}, 0.5)
+    
+    task.wait(0.6)
+    bg:Destroy()
+    if callback then callback() end
+end
+
+-- ==========================================
+-- GUI PRINCIPALE
+-- ==========================================
+function launchMainHub()
+    if CoreGui:FindFirstChild("KIPSECRET_UI") then 
+        CoreGui:FindFirstChild("KIPSECRET_UI"):Destroy() 
+    end
+
+    local Screen = Instance.new("ScreenGui", CoreGui)
+    Screen.Name = "KIPSECRET_UI"
+    Screen.ResetOnSpawn = false
+    Screen.DisplayOrder = 9999
+
+    -- CERCHIO MINIMIZZATO
+    local miniCircle = Instance.new("Frame", Screen)
+    miniCircle.Name = "MiniCircle"
+    miniCircle.Size = UDim2.new(0, 50, 0, 50)
+    miniCircle.Position = UDim2.new(0, 100, 0, 100)
+    miniCircle.BackgroundColor3 = C.blood
+    miniCircle.BackgroundTransparency = 0.1
+    miniCircle.BorderSizePixel = 0
+    miniCircle.Visible = false
+    miniCircle.ZIndex = 9999
+    Instance.new("UICorner", miniCircle).CornerRadius = UDim.new(1, 0)
+    
+    local circleGrad = Instance.new("UIGradient", miniCircle)
+    circleGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(120, 0, 0)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(200, 30, 30)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(80, 0, 0))
+    })
+    circleGrad.Rotation = 45
+    
+    local circleStroke = Instance.new("UIStroke", miniCircle)
+    circleStroke.Color = C.glow
+    circleStroke.Thickness = 2
+    
+    local circleLabel = Instance.new("TextLabel", miniCircle)
+    circleLabel.Size = UDim2.new(1, 0, 1, 0)
+    circleLabel.BackgroundTransparency = 1
+    circleLabel.Text = "w"
+    circleLabel.TextColor3 = C.white
+    circleLabel.TextSize = 22
+    circleLabel.Font = Enum.Font.GothamBold
+    circleLabel.ZIndex = 10000
+    
+    local pulse = Instance.new("Frame", miniCircle)
+    pulse.Size = UDim2.new(1, 0, 1, 0)
+    pulse.BackgroundColor3 = C.glow
+    pulse.BackgroundTransparency = 0.7
+    pulse.ZIndex = 9998
+    Instance.new("UICorner", pulse).CornerRadius = UDim.new(1, 0)
+    
+    TweenService:Create(pulse, TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.Out, -1, true), {
+        Size = UDim2.new(1.8, 0, 1.8, 0),
+        Position = UDim2.new(-0.4, 0, -0.4, 0),
+        BackgroundTransparency = 1
+    }):Play()
+
+    -- MAIN FRAME
+    local Win = Instance.new("Frame", Screen)
+    Win.Name = "MainWindow"
+    Win.Size = UDim2.new(0, 420, 0, 400)
+    Win.Position = UDim2.new(0.5, -210, 0.5, -200)
+    Win.BackgroundColor3 = C.bg
+    Win.BackgroundTransparency = 0.02
+    Win.BorderSizePixel = 0
+    Win.ClipsDescendants = true
+    Win.Visible = false
+    Instance.new("UICorner", Win).CornerRadius = UDim.new(0, 16)
+    
+    local bgGrad = Instance.new("UIGradient", Win)
+    bgGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(100, 0, 0)),
+        ColorSequenceKeypoint.new(0.3, Color3.fromRGB(180, 10, 10)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(220, 30, 30)),
+        ColorSequenceKeypoint.new(0.7, Color3.fromRGB(180, 10, 10)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 0, 0))
+    })
+    bgGrad.Rotation = 0
+    
+    local OV = Instance.new("Frame", Win)
+    OV.Size = UDim2.new(1, 0, 1, 0)
+    OV.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    OV.BackgroundTransparency = 0.65
+    OV.BorderSizePixel = 0
+    OV.ZIndex = 2
+    Instance.new("UICorner", OV).CornerRadius = UDim.new(0, 16)
+
+    -- Animazione gradiente
+    spawn(function()
+        local rot = 0
+        while Win and Win.Parent do
+            rot = rot + 1
+            if rot > 360 then rot = 0 end
+            bgGrad.Rotation = rot
+            task.wait(0.05)
+        end
+    end)
+
+    -- TITLE BAR
+    local TitleBar = Instance.new("Frame", Win)
+    TitleBar.Size = UDim2.new(1, 0, 0, 50)
+    TitleBar.BackgroundColor3 = C.panel
+    TitleBar.BackgroundTransparency = 0.2
+    TitleBar.BorderSizePixel = 0
+    TitleBar.ZIndex = 10
+    
+    local titleGrad = Instance.new("UIGradient", TitleBar)
+    titleGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(140, 0, 0)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(60, 0, 0))
+    })
+    titleGrad.Rotation = 90
+
+    local titleTxt = Instance.new("TextLabel", TitleBar)
+    titleTxt.Size = UDim2.new(0, 180, 1, 0)
+    titleTxt.Position = UDim2.new(0, 15, 0, 0)
+    titleTxt.BackgroundTransparency = 1
+    titleTxt.Text = "wKip Secret"
+    titleTxt.TextColor3 = C.white
+    titleTxt.TextSize = 18
+    titleTxt.Font = Enum.Font.GothamBold
+    titleTxt.TextXAlignment = Enum.TextXAlignment.Left
+    titleTxt.ZIndex = 11
+
+    local subTxt = Instance.new("TextLabel", TitleBar)
+    subTxt.Size = UDim2.new(0, 120, 1, 0)
+    subTxt.Position = UDim2.new(0, 145, 0, 0)
+    subTxt.BackgroundTransparency = 1
+    subTxt.Text = "|  private"
+    subTxt.TextColor3 = C.muted
+    subTxt.TextSize = 11
+    subTxt.Font = Enum.Font.GothamMedium
+    subTxt.TextXAlignment = Enum.TextXAlignment.Left
+    subTxt.ZIndex = 11
+
+    local minBtn = Instance.new("TextButton", TitleBar)
+    minBtn.Size = UDim2.new(0, 28, 0, 28)
+    minBtn.Position = UDim2.new(1, -66, 0.5, -14)
+    minBtn.BackgroundColor3 = C.dim
+    minBtn.BackgroundTransparency = 0.3
+    minBtn.Text = "-"
+    minBtn.TextColor3 = C.muted
+    minBtn.TextSize = 20
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.BorderSizePixel = 0
+    minBtn.ZIndex = 11
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
+
+    local closeBtn = Instance.new("TextButton", TitleBar)
+    closeBtn.Size = UDim2.new(0, 28, 0, 28)
+    closeBtn.Position = UDim2.new(1, -32, 0.5, -14)
+    closeBtn.BackgroundColor3 = C.blood
+    closeBtn.BackgroundTransparency = 0.3
+    closeBtn.Text = "x"
+    closeBtn.TextColor3 = C.white
+    closeBtn.TextSize = 16
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.BorderSizePixel = 0
+    closeBtn.ZIndex = 11
+    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
+
+    local divLine = Instance.new("Frame", Win)
+    divLine.Size = UDim2.new(1, -30, 0, 1)
+    divLine.Position = UDim2.new(0, 15, 0, 50)
+    divLine.BackgroundColor3 = C.blood
+    divLine.BackgroundTransparency = 0.3
+    divLine.BorderSizePixel = 0
+    divLine.ZIndex = 10
+
+    -- SCROLL AREA
+    local Scroll = Instance.new("ScrollingFrame", Win)
+    Scroll.Size = UDim2.new(1, -20, 1, -65)
+    Scroll.Position = UDim2.new(0, 10, 0, 58)
+    Scroll.BackgroundTransparency = 1
+    Scroll.BorderSizePixel = 0
+    Scroll.ScrollBarThickness = 3
+    Scroll.ScrollBarImageColor3 = C.blood
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, 900)
+    Scroll.ZIndex = 12
+
+    -- FUNZIONI GUI
+    local function makeSection(y, text)
+        local row = Instance.new("Frame", Scroll)
+        row.Size = UDim2.new(1, -10, 0, 24)
+        row.Position = UDim2.new(0, 5, 0, y)
+        row.BackgroundTransparency = 1
+        row.ZIndex = 14
+        local line = Instance.new("Frame", row)
+        line.Size = UDim2.new(1, 0, 0, 1)
+        line.Position = UDim2.new(0, 0, 0.5, 0)
+        line.BackgroundColor3 = C.blood
+        line.BackgroundTransparency = 0.4
+        line.BorderSizePixel = 0
+        line.ZIndex = 14
+        local bg = Instance.new("Frame", row)
+        bg.Position = UDim2.new(0.5, 0, 0, 0)
+        bg.AnchorPoint = Vector2.new(0.5, 0)
+        bg.BackgroundColor3 = C.dark
+        bg.BackgroundTransparency = 0.1
+        bg.BorderSizePixel = 0
+        bg.AutomaticSize = Enum.AutomaticSize.X
+        bg.Size = UDim2.new(0, 0, 1, 0)
+        bg.ZIndex = 15
+        local lbl = Instance.new("TextLabel", bg)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = "  " .. text .. "  "
+        lbl.TextColor3 = C.glow
+        lbl.TextSize = 11
+        lbl.Font = Enum.Font.GothamBold
+        lbl.AutomaticSize = Enum.AutomaticSize.X
+        lbl.Size = UDim2.new(0, 0, 1, 0)
+        lbl.ZIndex = 16
+    end
+
+    local function makeToggle(y, label, default, callback)
+        local c = Instance.new("Frame", Scroll)
+        c.Size = UDim2.new(1, -10, 0, 44)
+        c.Position = UDim2.new(0, 5, 0, y)
+        c.BackgroundColor3 = C.card
+        c.BackgroundTransparency = 0.4
+        c.BorderSizePixel = 0
+        c.ZIndex = 14
+        c.ClipsDescendants = true
+        Instance.new("UICorner", c).CornerRadius = UDim.new(0, 10)
+        local cs = Instance.new("UIStroke", c)
+        cs.Color = C.dim
+        cs.Thickness = 1
+
+        local side = Instance.new("Frame", c)
+        side.Size = UDim2.new(0, 3, 0.6, 0)
+        side.Position = UDim2.new(0, 0, 0.2, 0)
+        side.BackgroundColor3 = default and C.glow or C.dim
+        side.BorderSizePixel = 0
+        side.ZIndex = 15
+        Instance.new("UICorner", side).CornerRadius = UDim.new(1, 0)
+
+        local lbl = Instance.new("TextLabel", c)
+        lbl.Size = UDim2.new(1, -110, 1, 0)
+        lbl.Position = UDim2.new(0, 15, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = label
+        lbl.TextColor3 = C.white
+        lbl.TextSize = 14
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.ZIndex = 15
+
+        local tBg = Instance.new("Frame", c)
+        tBg.Size = UDim2.new(0, 44, 0, 22)
+        tBg.Position = UDim2.new(1, -54, 0.5, -11)
+        tBg.BackgroundColor3 = default and C.blood or C.dim
+        tBg.BackgroundTransparency = default and 0.2 or 0.1
+        tBg.BorderSizePixel = 0
+        tBg.ZIndex = 15
+        Instance.new("UICorner", tBg).CornerRadius = UDim.new(1, 0)
+        local tStr = Instance.new("UIStroke", tBg)
+        tStr.Color = default and C.glow or C.dim
+        tStr.Thickness = 1.5
+
+        local circ = Instance.new("Frame", tBg)
+        circ.Size = UDim2.new(0, 16, 0, 16)
+        circ.Position = default and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+        circ.BackgroundColor3 = C.white
+        circ.BorderSizePixel = 0
+        circ.ZIndex = 16
+        Instance.new("UICorner", circ).CornerRadius = UDim.new(1, 0)
+
+        local val = default or false
+        local btn = Instance.new("TextButton", c)
+        btn.Size = UDim2.new(1, 0, 1, 0)
+        btn.BackgroundTransparency = 1
+        btn.Text = ""
+        btn.ZIndex = 17
+
+        btn.MouseButton1Click:Connect(function()
+            val = not val
+            tw(tBg, {BackgroundColor3 = val and C.blood or C.dim, BackgroundTransparency = val and 0.2 or 0.1}, 0.2)
+            tw(tStr, {Color = val and C.glow or C.dim}, 0.2)
+            tw(circ, {Position = val and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)}, 0.2)
+            tw(side, {BackgroundColor3 = val and C.glow or C.dim}, 0.2)
+            if callback then callback(val) end
+        end)
+        btn.MouseEnter:Connect(function() tw(c, {BackgroundTransparency = 0.2}, 0.12) end)
+        btn.MouseLeave:Connect(function() tw(c, {BackgroundTransparency = 0.4}, 0.12) end)
+        return {set = function(v)
+            val = v
+            tw(tBg, {BackgroundColor3 = val and C.blood or C.dim, BackgroundTransparency = val and 0.2 or 0.1}, 0.2)
+            tw(tStr, {Color = val and C.glow or C.dim}, 0.2)
+            tw(circ, {Position = val and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)}, 0.2)
+            tw(side, {BackgroundColor3 = val and C.glow or C.dim}, 0.2)
+        end}
+    end
+
+    local classicFrame, proFrame = nil, nil
+    local classicSide, proSide = nil, nil
+
+    local function makeModeButton(y, label, mode, cb)
+        local c = Instance.new("Frame", Scroll)
+        c.Size = UDim2.new(1, -10, 0, 42)
+        c.Position = UDim2.new(0, 5, 0, y)
+        c.BackgroundColor3 = C.blood
+        c.BackgroundTransparency = (autoMode == mode) and 0.25 or 0.6
+        c.BorderSizePixel = 0
+        c.ZIndex = 14
+        c.ClipsDescendants = true
+        Instance.new("UICorner", c).CornerRadius = UDim.new(0, 10)
+        local cs = Instance.new("UIStroke", c)
+        cs.Color = (autoMode == mode) and C.gold or C.dim
+        cs.Thickness = (autoMode == mode) and 2 or 1
+
+        local side = Instance.new("Frame", c)
+        side.Size = UDim2.new(0, 3, 0.6, 0)
+        side.Position = UDim2.new(0, 0, 0.2, 0)
+        side.BackgroundColor3 = (autoMode == mode) and C.gold or C.dim
+        side.BorderSizePixel = 0
+        side.ZIndex = 15
+        Instance.new("UICorner", side).CornerRadius = UDim.new(1, 0)
+
+        local lbl = Instance.new("TextLabel", c)
+        lbl.Size = UDim2.new(1, -20, 1, 0)
+        lbl.Position = UDim2.new(0, 15, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = label .. ((autoMode == mode) and "  [active]" or "")
+        lbl.TextColor3 = C.white
+        lbl.TextSize = 14
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.ZIndex = 15
+
+        local btn = Instance.new("TextButton", c)
+        btn.Size = UDim2.new(1, 0, 1, 0)
+        btn.BackgroundTransparency = 1
+        btn.Text = ""
+        btn.ZIndex = 16
+        
+        if mode == "Classic" then
+            classicFrame = c
+            classicSide = side
+        else
+            proFrame = c
+            proSide = side
+        end
+
+        btn.MouseButton1Click:Connect(function()
+            autoMode = mode
+            
+            tw(classicFrame, {BackgroundTransparency = 0.6}, 0.2)
+            tw(proFrame, {BackgroundTransparency = 0.6}, 0.2)
+            classicFrame:FindFirstChildOfClass("UIStroke").Color = C.dim
+            classicFrame:FindFirstChildOfClass("UIStroke").Thickness = 1
+            proFrame:FindFirstChildOfClass("UIStroke").Color = C.dim
+            proFrame:FindFirstChildOfClass("UIStroke").Thickness = 1
+            classicSide.BackgroundColor3 = C.dim
+            proSide.BackgroundColor3 = C.dim
+            
+            tw(c, {BackgroundTransparency = 0.25}, 0.2)
+            cs.Color = C.gold
+            cs.Thickness = 2
+            side.BackgroundColor3 = C.gold
+            
+            classicFrame:FindFirstChildOfClass("TextLabel").Text = "Classic Mode" .. ((mode == "Classic") and "  [active]" or "")
+            proFrame:FindFirstChildOfClass("TextLabel").Text = "Pro Mode" .. ((mode == "Pro") and "  [active]" or "")
+            
+            if cb then cb() end
+        end)
+        btn.MouseEnter:Connect(function() tw(c, {BackgroundTransparency = 0.4}, 0.12) end)
+        btn.MouseLeave:Connect(function() 
+            if autoMode ~= mode then tw(c, {BackgroundTransparency = 0.6}, 0.12) end
+        end)
+    end
+
+    local function makeSlider(y, label, min, max, default, callback)
+        local c = Instance.new("Frame", Scroll)
+        c.Size = UDim2.new(1, -10, 0, 60)
+        c.Position = UDim2.new(0, 5, 0, y)
+        c.BackgroundColor3 = C.card
+        c.BackgroundTransparency = 0.4
+        c.BorderSizePixel = 0
+        c.ZIndex = 14
+        Instance.new("UICorner", c).CornerRadius = UDim.new(0, 10)
+        local cs = Instance.new("UIStroke", c)
+        cs.Color = C.dim
+        cs.Thickness = 1
+
+        local side = Instance.new("Frame", c)
+        side.Size = UDim2.new(0, 3, 0.6, 0)
+        side.Position = UDim2.new(0, 0, 0.2, 0)
+        side.BackgroundColor3 = C.blood
+        side.BorderSizePixel = 0
+        side.ZIndex = 15
+        Instance.new("UICorner", side).CornerRadius = UDim.new(1, 0)
+
+        local top = Instance.new("Frame", c)
+        top.Size = UDim2.new(1, -20, 0, 24)
+        top.Position = UDim2.new(0, 14, 0, 8)
+        top.BackgroundTransparency = 1
+        top.ZIndex = 15
+        local lbl = Instance.new("TextLabel", top)
+        lbl.Size = UDim2.new(0.7, 0, 1, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = label
+        lbl.TextColor3 = C.white
+        lbl.TextSize = 13
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.ZIndex = 15
+        local valLbl = Instance.new("TextLabel", top)
+        valLbl.Size = UDim2.new(0.3, 0, 1, 0)
+        valLbl.Position = UDim2.new(0.7, 0, 0, 0)
+        valLbl.BackgroundTransparency = 1
+        valLbl.Text = tostring(default)
+        valLbl.TextColor3 = C.glow
+        valLbl.TextSize = 13
+        valLbl.Font = Enum.Font.GothamBold
+        valLbl.TextXAlignment = Enum.TextXAlignment.Right
+        valLbl.ZIndex = 15
+
+        local track = Instance.new("Frame", c)
+        track.Size = UDim2.new(1, -24, 0, 5)
+        track.Position = UDim2.new(0, 14, 0, 44)
+        track.BackgroundColor3 = C.dim
+        track.BackgroundTransparency = 0.2
+        track.BorderSizePixel = 0
+        track.ZIndex = 15
+        Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+        local pct = (default - min) / (max - min)
+        local fill = Instance.new("Frame", track)
+        fill.Size = UDim2.new(pct, 0, 1, 0)
+        fill.BackgroundColor3 = C.red
+        fill.BackgroundTransparency = 0.1
+        fill.BorderSizePixel = 0
+        fill.ZIndex = 16
+        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+        local thumb = Instance.new("Frame", track)
+        thumb.Size = UDim2.new(0, 16, 0, 16)
+        thumb.Position = UDim2.new(pct, -8, 0.5, -8)
+        thumb.BackgroundColor3 = C.white
+        thumb.BorderSizePixel = 0
+        thumb.ZIndex = 17
+        Instance.new("UICorner", thumb).CornerRadius = UDim.new(1, 0)
+        local tStr = Instance.new("UIStroke", thumb)
+        tStr.Color = C.glow
+        tStr.Thickness = 2
+
+        local dragging = false
+        local function updateSlider(rel)
+            rel = math.clamp(rel, 0, 1)
+            fill.Size = UDim2.new(rel, 0, 1, 0)
+            thumb.Position = UDim2.new(rel, -8, 0.5, -8)
+            local v = min + (max - min) * rel
+            valLbl.Text = tostring(math.floor(v * 10) / 10)
+            if callback then callback(v) end
+        end
+
+        thumb.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then 
+                dragging = true 
+            end 
+        end)
+        UserInputService.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then 
+                dragging = false 
+            end 
+        end)
+        UserInputService.InputChanged:Connect(function(i)
+            if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                updateSlider((i.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X)
+            end
+        end)
+    end
+
+    -- CONTENUTO GUI
+    local welcome = Instance.new("Frame", Scroll)
+    welcome.Size = UDim2.new(1, -10, 0, 65)
+    welcome.Position = UDim2.new(0, 5, 0, 5)
+    welcome.BackgroundColor3 = C.blood
+    welcome.BackgroundTransparency = 0.4
+    welcome.BorderSizePixel = 0
+    welcome.ZIndex = 14
+    welcome.ClipsDescendants = true
+    Instance.new("UICorner", welcome).CornerRadius = UDim.new(0, 12)
+    local wStr = Instance.new("UIStroke", welcome)
+    wStr.Color = C.glow
+    wStr.Thickness = 1.5
+    wStr.Transparency = 0.3
+
+    local wT = Instance.new("TextLabel", welcome)
+    wT.Size = UDim2.new(1, -18, 0, 28)
+    wT.Position = UDim2.new(0, 15, 0, 8)
+    wT.BackgroundTransparency = 1
+    wT.Text = "Welcome, " .. LocalPlayer.Name
+    wT.TextColor3 = C.white
+    wT.TextSize = 15
+    wT.Font = Enum.Font.GothamBold
+    wT.TextXAlignment = Enum.TextXAlignment.Left
+    wT.ZIndex = 15
+
+    local wS = Instance.new("TextLabel", welcome)
+    wS.Size = UDim2.new(1, -18, 0, 20)
+    wS.Position = UDim2.new(0, 15, 0, 38)
+    wS.BackgroundTransparency = 1
+    wS.Text = "wKip Secret v1.0"
+    wS.TextColor3 = C.glow
+    wS.TextSize = 12
+    wS.Font = Enum.Font.GothamMedium
+    wS.TextXAlignment = Enum.TextXAlignment.Left
+    wS.ZIndex = 15
+
+    makeSection(78, "COMBAT")
+    local autoToggle = makeToggle(108, "Auto", false, function(v) if v then startAuto() else stopAuto() end end)
+    
+    makeModeButton(158, "Classic Mode", "Classic", function() end)
+    makeModeButton(208, "Pro Mode", "Pro", function() end)
+
+    makeSection(260, "SETTINGS")
+    makeSlider(290, "Max Number", 1, 10, 5, function(v) targetNumber = v end)
+    makeSlider(358, "Keep Distance", 1, 10, 3.5, function(v) KEEP_DISTANCE = v end)
+    makeSlider(426, "Wall Distance", 0.5, 5, 2.5, function(v) wallDistance = v end)
+    
+    local flickToggle = makeToggle(496, "Flick", false, function(v) toggleFlick(v) end)
+    makeSlider(556, "Flick Power", 5, 45, 45, function(v) flickPower = v end)
+    
+    local stretchToggle = makeToggle(624, "Stretch", false, function(v) 
+        stretchEnabled = v 
+        if v then updateStretch() else if stretchConn then stretchConn:Disconnect(); stretchConn = nil end end 
+    end)
+    
+    -- HITBOX EXPANDER SEZIONE
+    makeSection(678, "HITBOX")
+    local hitboxToggle = makeToggle(708, "Hitbox Expander", false, function(v) 
+        hitboxEnabled = v 
+        updateHitboxSystem()
+    end)
+    
+    makeSlider(766, "Hitbox Size", 1, 15, 5, function(v) 
+        hitboxSize = v 
+        if hitboxEnabled then updateHitboxSystem() end
+    end)
+    
+    local hitboxVisToggle = makeToggle(834, "Show Hitbox", false, function(v) 
+        hitboxVisible = v 
+        if hitboxEnabled then
+            for _, part in pairs(hitboxParts) do
+                if part then part.Transparency = v and 0.7 or 1 end
+            end
+        end
+    end)
+
+    local fpsToggle = makeToggle(888, "FPS Boost", false, function(v) 
+        fpsEnabled = v 
+        if v then applyFPS() end 
+    end)
+    
+    local escapeToggle = makeToggle(942, "Escape", true, function(v) escapeMode = v end)
+
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, 1000)
+
+    -- DRAG FINESTRA
+    local drag, ds, wp = false, nil, nil
+    TitleBar.InputBegan:Connect(function(i) 
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then 
+            drag = true 
+            ds = i.Position 
+            wp = Win.Position 
+        end 
+    end)
+    UserInputService.InputChanged:Connect(function(i) 
+        if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then 
+            local d = i.Position - ds 
+            Win.Position = UDim2.new(wp.X.Scale, wp.X.Offset + d.X, wp.Y.Scale, wp.Y.Offset + d.Y) 
+        end 
+    end)
+    UserInputService.InputEnded:Connect(function(i) 
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then 
+            drag = false 
+        end 
+    end)
+
+    -- SISTEMA MINIMIZZA/RIPRISTINA CON FIX DRAG
+    local mini = false
+    
+    minBtn.MouseButton1Click:Connect(function() 
+        if not mini then
+            local currentPos = Win.AbsolutePosition
+            miniCircle.Position = UDim2.new(0, currentPos.X + 185, 0, currentPos.Y + 175)
+            
+            tw(Win, {Size = UDim2.new(0, 50, 0, 50), Position = miniCircle.Position}, 0.4, Enum.EasingStyle.Back).Completed:Connect(function()
+                Win.Visible = false
+                miniCircle.Visible = true
+                mini = true
+            end)
+        end
+    end)
+
+    -- Gestione cerchio: drag vs click (FIXATO - non muove la camera)
+    local dragStartPos = nil
+    local circleStartPos = nil
+    local isDraggingCircle = false
+    local dragThreshold = 5
+
+    miniCircle.InputBegan:Connect(function(i) 
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then 
+            dragStartPos = i.Position
+            circleStartPos = miniCircle.Position
+            isDraggingCircle = false
+        end 
+    end)
+
+    UserInputService.InputChanged:Connect(function(i) 
+        if dragStartPos and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then 
+            local delta = i.Position - dragStartPos
+            if math.abs(delta.X) > dragThreshold or math.abs(delta.Y) > dragThreshold then
+                isDraggingCircle = true
+                miniCircle.Position = UDim2.new(circleStartPos.X.Scale, circleStartPos.X.Offset + delta.X, 
+                                               circleStartPos.Y.Scale, circleStartPos.Y.Offset + delta.Y)
+            end
+        end 
+    end)
+
+    UserInputService.InputEnded:Connect(function(i) 
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then 
+            if dragStartPos then
+                if not isDraggingCircle then
+                    -- Era un click, riapri il pannello
+                    miniCircle.Visible = false
+                    Win.Visible = true
+                    mini = false
+                    Win.Size = UDim2.new(0, 50, 0, 50)
+                    tw(Win, {Size = UDim2.new(0, 420, 0, 400), Position = UDim2.new(0.5, -210, 0.5, -200)}, 0.5, Enum.EasingStyle.Back)
+                end
+                dragStartPos = nil
+                isDraggingCircle = false
+            end
+        end 
+    end)
+
+    -- CHIUDI
+    closeBtn.MouseButton1Click:Connect(function() 
+        -- Rimuovi hitbox prima di chiudere
+        removeAllHitboxes()
+        tw(Win, {Size = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1}, 0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In).Completed:Connect(function()
+            Screen:Destroy()
+        end)
+    end)
+
+    -- AVVIO CON INTRO
+    playIntro(Screen, function()
+        Win.Visible = true
+        Win.Size = UDim2.new(0, 0, 0, 0)
+        tw(Win, {Size = UDim2.new(0, 420, 0, 400)}, 0.6, Enum.EasingStyle.Back)
+    end)
+end
+
+-- AVVIA
+launchMainHub()
